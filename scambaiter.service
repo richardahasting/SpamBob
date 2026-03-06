@@ -1,0 +1,16 @@
+[Unit]
+Description=Scambaiter — Bob Gaines scam engagement bot
+After=network.target dovecot.service postfix.service
+
+[Service]
+Type=simple
+User=richard
+WorkingDirectory=/home/richard/projects/scambaiter
+ExecStart=/usr/bin/python3 /home/richard/projects/scambaiter/scambaiter.py
+Restart=on-failure
+RestartSec=60
+StandardOutput=append:/home/richard/projects/scambaiter/scambaiter.log
+StandardError=append:/home/richard/projects/scambaiter/scambaiter.log
+
+[Install]
+WantedBy=multi-user.target
