@@ -7,10 +7,10 @@ import subprocess
 import sys
 
 CHURCH_PERSONAS = [
-    "pastor@firstchurchoffidelity.net",
-    "secretary@firstchurchoffidelity.net",
-    "harold@firstchurchoffidelity.net",
-    "ruthanne@firstchurchoffidelity.net",
+    "pastor@firstchurchoffidelity.org",
+    "secretary@firstchurchoffidelity.org",
+    "harold@firstchurchoffidelity.org",
+    "ruthanne@firstchurchoffidelity.org",
 ]
 
 SIEVE_SCRIPT = """\

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sets up firstchurchoffidelity.net on this mail server.
+# Sets up firstchurchoffidelity.org on this mail server.
 # Run AFTER pointing the domain's MX record to mail.hastingtx.org.
 #
 # What this does:
@@ -11,7 +11,7 @@
 #   6. Prints DNS records you need to add
 
 set -euo pipefail
-DOMAIN="firstchurchoffidelity.net"
+DOMAIN="firstchurchoffidelity.org"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "======================================================"
