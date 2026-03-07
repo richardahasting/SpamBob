@@ -57,6 +57,12 @@ SCAM_SA_TESTS = [
     "ROMANCE_SCAM", "FROM_NIGERIA", "LOCAL_SCAM",
 ]
 
+# Emails from these addresses are manually forwarded scams — extract the real sender.
+TRUSTED_FORWARDERS = {addr.strip().lower() for addr in
+                      os.getenv("TRUSTED_FORWARDERS", "richard@hastingtx.org").split(",")}
+
+DIGEST_HOUR = int(os.getenv("DIGEST_HOUR", "7"))  # Hour (UTC) to send daily digest
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -120,6 +126,24 @@ def thread_ids(msg) -> list[str]:
     return ids
 
 
+def extract_forwarded_sender(body: str) -> tuple[str, str] | tuple[None, None]:
+    """
+    Parse the original From: line out of a forwarded email body.
+    Handles both Gmail style ('---------- Forwarded message ---------')
+    and Outlook style ('From: X\nSent: ...\nTo: ...\nSubject: ...').
+    Returns (name, email) or (None, None) if not found.
+    """
+    for line in body.splitlines():
+        line = line.strip()
+        # Look for a 'From:' line that isn't the current message header
+        if re.match(r"^From\s*:", line, re.IGNORECASE):
+            addr_part = line.split(":", 1)[1].strip()
+            name, addr = parseaddr(addr_part)
+            if addr and "@" in addr:
+                return name.strip(), addr.strip().lower()
+    return None, None
+
+
 def is_scam_email(msg) -> bool:
     if "YES" not in msg.get("X-Spam-Flag", "").upper():
         return False
@@ -176,8 +200,8 @@ def generate_reply(persona_key: str, conversation_id: int, new_email_text: str) 
 
     client   = Anthropic()
     response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=600,
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
         system=persona["system_prompt"],
         messages=messages,
     )
@@ -224,6 +248,33 @@ def send_email(
     return mid
 
 # ── Core conversation logic ───────────────────────────────────────────────────
+
+# ── Scam type routing ────────────────────────────────────────────────────────
+
+# Keywords → best persona match
+_SCAM_ROUTING = [
+    (["inheritance", "next-of-kin", "next of kin", "deceased", "intestate",
+      "barrister", "attorney", "legal counsel", "law chamber"],         "pastor"),
+    (["lottery", "winner", "prize", "congratulations", "awarded",
+      "beneficiary", "compensation board", "stimulus"],                  "ruthanne"),
+    (["domain", "registrar", "cn.", ".com.cn", "brand protection",
+      "chinese", "asia registry", "trademark"],                          "harold"),
+    (["romance", "love", "lonely", "military", "soldier", "widower",
+      "widow", "heart", "soulmate", "relationship"],                     "bob"),
+]
+
+def route_scam_to_persona(msg) -> str:
+    """Pick the best persona for a new scam based on subject + body keywords."""
+    subject = (msg.get("Subject", "") or "").lower()
+    body    = extract_text(msg).lower()
+    text    = subject + " " + body
+    for keywords, persona_key in _SCAM_ROUTING:
+        if any(kw in text for kw in keywords):
+            # Only route to a persona that has IMAP credentials configured
+            if os.getenv(f"IMAP_USER_{persona_key.upper()}"):
+                return persona_key
+    return "bob"  # default
+
 
 def handle_new_scam(msg, uid, imap, folder, persona_key: str) -> None:
     scammer_name, scammer_email = parse_address(msg.get("From", ""))
@@ -341,8 +392,8 @@ def spawn_referral(conv: dict, from_persona_key: str) -> None:
     from anthropic import Anthropic
     client = Anthropic()
     response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=400,
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
         system=ref_persona["system_prompt"],
         messages=[{"role": "user", "content": intro_prompt}],
     )
@@ -359,7 +410,14 @@ def spawn_referral(conv: dict, from_persona_key: str) -> None:
         ref_key,
     )
     db.add_message(new_conv_id, "outbound", f"Re: {conv['subject']}", intro_text)
-    db.set_pending_intro(new_conv_id, intro_text, conv["scammer_email"])
+    db.set_pending_intro(
+        new_conv_id,
+        intro_text,
+        conv["scammer_email"],
+        ref_key,
+        f"Re: {conv['subject']}",
+        send_after,
+    )
 
     log.info("REFERRAL  spawning %s to engage %s (sends ~%s UTC)",
              ref_key, conv["scammer_email"], send_after.strftime("%Y-%m-%d %H:%M"))
@@ -382,6 +440,19 @@ def scan_persona(persona_key: str) -> None:
             if not sender_email or sender_email == persona_email:
                 continue
 
+            # If this came from a trusted forwarder, extract the real scammer address.
+            if sender_email in TRUSTED_FORWARDERS or "hasting" in sender_email:
+                body = extract_text(msg)
+                real_name, real_email = extract_forwarded_sender(body)
+                if real_email:
+                    log.info("Forwarded scam from %s — real sender: %s", sender_email, real_email)
+                    msg.replace_header("From", f"{real_name} <{real_email}>" if real_name else real_email)
+                    sender_email = real_email
+                else:
+                    log.warning("Could not parse forwarded sender from %s — skipping", sender_email)
+                    mark_seen(imap, uid)
+                    continue
+
             refs = thread_ids(msg)
             conv = db.find_conversation_by_thread(refs) \
                 or db.find_conversation_by_sender(sender_email)
@@ -389,7 +460,8 @@ def scan_persona(persona_key: str) -> None:
             if conv:
                 handle_scammer_reply(conv, msg, uid, imap)
             elif folder == SCAM_FOLDER or is_scam_email(msg):
-                handle_new_scam(msg, uid, imap, folder, persona_key)
+                routed_key = route_scam_to_persona(msg)
+                handle_new_scam(msg, uid, imap, folder, routed_key)
 
     imap.logout()
 
@@ -422,6 +494,8 @@ def run() -> None:
 
     log.info("Scambaiter started. Active personas: %s", active_personas)
 
+    last_digest_day: int | None = None
+
     while True:
         try:
             for persona_key in active_personas:
@@ -433,6 +507,17 @@ def run() -> None:
             abandoned = db.abandon_stale_conversations(ABANDON_DAYS)
             if abandoned:
                 log.info("Abandoned %d stale conversation(s)", abandoned)
+
+            # Daily digest at DIGEST_HOUR UTC
+            now_utc = datetime.utcnow()
+            if now_utc.hour == DIGEST_HOUR and last_digest_day != now_utc.date():
+                try:
+                    from stats import send_digest
+                    send_digest()
+                    last_digest_day = now_utc.date()
+                    log.info("Daily digest sent")
+                except Exception as exc:
+                    log.warning("Digest send failed: %s", exc)
 
             stats = db.get_stats()
             log.info("Stats: %d active | %d total | %d turns wasted",
